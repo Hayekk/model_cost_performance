@@ -1,0 +1,679 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LLM Performance-to-Cost Ratio Dashboard</title>
+  <meta name="description" content="Interactive comparison of AI model performance-to-cost ratios with sensitivity analysis across usage scenarios. Feb 2026 data." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,500;0,9..40,700;0,9..40,800;1,9..40,400&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body, #root { min-height: 100vh; }
+    body { background: #0a0a18; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- React 18 -->
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+  <!-- Recharts -->
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/recharts/2.15.0/Recharts.min.js"></script>
+  <!-- Babel standalone for JSX -->
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.4/babel.min.js"></script>
+
+  <script type="text/babel" data-type="module">
+    const { useState, useMemo } = React;
+    const {
+      BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
+      ScatterChart, Scatter, ZAxis, ResponsiveContainer, Cell,
+    } = Recharts;
+
+    /* ───────────── MODEL DATA ───────────── */
+    const MODELS = {
+      flagship: [
+        { name: "Gemini 3.1 Pro", provider: "Google", inputPrice: 2.0, outputPrice: 12.0, cachedInputPrice: 0.20, gpqa: 94.3, swebench: 80.6, mmmlu: 92.0, hle: 44.4, color: "#4285f4", released: "Feb 19 '26" },
+        { name: "GPT-5.2", provider: "OpenAI", inputPrice: 1.75, outputPrice: 14.0, cachedInputPrice: 0.175, gpqa: 92.4, swebench: 80.0, mmmlu: 90.0, hle: 35.0, color: "#10a37f", released: "Dec 11 '25" },
+        { name: "Claude Opus 4.6", provider: "Anthropic", inputPrice: 5.0, outputPrice: 25.0, cachedInputPrice: 0.50, gpqa: 91.3, swebench: 80.8, mmmlu: 91.0, hle: 37.5, color: "#d97706", released: "Feb 5 '26" },
+      ],
+      mid: [
+        { name: "Claude Sonnet 4.6", provider: "Anthropic", inputPrice: 3.0, outputPrice: 15.0, cachedInputPrice: 0.30, gpqa: 74.1, swebench: 79.6, mmmlu: 89.0, hle: 18.0, color: "#d97706", released: "Feb 17 '26" },
+        { name: "GPT-5", provider: "OpenAI", inputPrice: 1.25, outputPrice: 10.0, cachedInputPrice: 0.125, gpqa: 87.3, swebench: 72.0, mmmlu: 88.0, hle: 35.2, color: "#10a37f", released: "Aug 7 '25" },
+        { name: "Gemini 3 Flash", provider: "Google", inputPrice: 0.50, outputPrice: 3.0, cachedInputPrice: 0.05, gpqa: 82.0, swebench: 70.0, mmmlu: 87.0, hle: 18.0, color: "#4285f4", released: "Feb '26" },
+      ],
+      budget: [
+        { name: "GPT-5 Mini", provider: "OpenAI", inputPrice: 0.25, outputPrice: 2.0, cachedInputPrice: 0.025, gpqa: 72.0, swebench: 55.0, mmmlu: 82.0, hle: 12.0, color: "#10a37f", released: "Aug 7 '25" },
+        { name: "Claude Haiku 4.5", provider: "Anthropic", inputPrice: 1.0, outputPrice: 5.0, cachedInputPrice: 0.10, gpqa: 65.0, swebench: 50.0, mmmlu: 80.0, hle: 8.0, color: "#d97706", released: "Oct '25" },
+        { name: "Gemini 2.5 Flash", provider: "Google", inputPrice: 0.15, outputPrice: 0.60, cachedInputPrice: 0.0375, gpqa: 68.0, swebench: 48.0, mmmlu: 78.0, hle: 10.0, color: "#4285f4", released: "Early '25" },
+      ],
+    };
+
+    const ALL_FLAT = Object.entries(MODELS).flatMap(([tier, models]) => models.map((m) => ({ ...m, tier })));
+
+    /* ───────────── SCORING ───────────── */
+    const BENCH_RANGES = { gpqa: { min: 40, max: 95 }, swebench: { min: 30, max: 85 }, mmmlu: { min: 60, max: 95 }, hle: { min: 0, max: 50 } };
+
+    function normalize(val, min, max) { return Math.max(0, Math.min(100, ((val - min) / (max - min)) * 100)); }
+
+    function compositeScore(m) {
+      return (normalize(m.gpqa, BENCH_RANGES.gpqa.min, BENCH_RANGES.gpqa.max) + normalize(m.swebench, BENCH_RANGES.swebench.min, BENCH_RANGES.swebench.max) + normalize(m.mmmlu, BENCH_RANGES.mmmlu.min, BENCH_RANGES.mmmlu.max) + normalize(m.hle, BENCH_RANGES.hle.min, BENCH_RANGES.hle.max)) / 4;
+    }
+
+    function calcCost(m, inputRatio, cacheHit) {
+      const outputRatio = 1 - inputRatio;
+      const effectiveInputPrice = m.cachedInputPrice * cacheHit + m.inputPrice * (1 - cacheHit);
+      return effectiveInputPrice * inputRatio + m.outputPrice * outputRatio;
+    }
+
+    function enrichModel(m, inputRatio, cacheHit) {
+      const comp = compositeScore(m);
+      const cost = calcCost(m, inputRatio, cacheHit);
+      return { ...m, composite: comp, cost, ratio: cost > 0 ? comp / cost : 0 };
+    }
+
+    /* ───────────── PRESETS ───────────── */
+    const IO_RATIOS = [
+      { label: "1:1", value: 0.5, desc: "Equal in & out" },
+      { label: "3:1", value: 0.75, desc: "Typical API" },
+      { label: "5:1", value: 5 / 6, desc: "Long prompt" },
+      { label: "10:1", value: 10 / 11, desc: "RAG heavy" },
+    ];
+    const CACHE_RATES = [
+      { label: "0%", value: 0, desc: "No caching" },
+      { label: "25%", value: 0.25, desc: "Light" },
+      { label: "50%", value: 0.50, desc: "Moderate" },
+      { label: "75%", value: 0.75, desc: "Aggressive" },
+    ];
+
+    const TIER_LABELS = { flagship: "Flagship", mid: "Mid-Tier", budget: "Budget" };
+    const TIER_ICONS = { flagship: "\u{1F3C6}", mid: "\u26A1", budget: "\u{1F4B0}" };
+    const TIER_GRADIENTS = {
+      flagship: "linear-gradient(135deg, #f0c040, #ff6b6b)",
+      mid: "linear-gradient(135deg, #38bdf8, #818cf8)",
+      budget: "linear-gradient(135deg, #4ade80, #22d3ee)",
+    };
+
+    /* ───────────── TOOLTIPS ───────────── */
+    const CustomBarTooltip = ({ active, payload }) => {
+      if (!active || !payload?.length) return null;
+      const d = payload[0]?.payload;
+      if (!d) return null;
+      return (
+        <div style={{ background: "#1a1a2e", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 10, padding: "14px 18px", fontSize: 13, lineHeight: 1.7, color: "#e0e0e0", maxWidth: 300, boxShadow: "0 12px 40px rgba(0,0,0,0.5)" }}>
+          <div style={{ fontWeight: 700, fontSize: 16, color: "#fff", marginBottom: 2 }}>{d.name}</div>
+          <div style={{ color: "#888", fontSize: 12, marginBottom: 10 }}>{d.provider} &middot; {d.released}</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 16px" }}>
+            <div>Score: <b style={{ color: "#f0c040" }}>{d.composite?.toFixed(1)}</b></div>
+            <div>Cost/1M: <b>${d.cost?.toFixed(3)}</b></div>
+            <div>Perf/$: <b style={{ color: "#4ade80" }}>{d.ratio?.toFixed(1)}</b></div>
+          </div>
+        </div>
+      );
+    };
+
+    const CustomScatterTooltip = ({ active, payload }) => {
+      if (!active || !payload?.length) return null;
+      const d = payload[0]?.payload;
+      if (!d) return null;
+      return (
+        <div style={{ background: "#1a1a2e", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 10, padding: "14px 18px", fontSize: 13, lineHeight: 1.7, color: "#e0e0e0", maxWidth: 260, boxShadow: "0 12px 40px rgba(0,0,0,0.5)" }}>
+          <div style={{ fontWeight: 700, fontSize: 16, color: "#fff", marginBottom: 2 }}>{d.name}</div>
+          <div style={{ color: "#888", fontSize: 12, marginBottom: 8 }}>{d.provider}</div>
+          <div>Performance: <b style={{ color: "#f0c040" }}>{d.y?.toFixed(1)}</b></div>
+          <div>Cost: <b>${d.x?.toFixed(3)}/1M tok</b></div>
+          <div>Ratio: <b style={{ color: "#4ade80" }}>{d.ratio?.toFixed(1)}</b></div>
+        </div>
+      );
+    };
+
+    /* ───────────── MODEL CARD ───────────── */
+    function ModelCard({ d }) {
+      const barWidth = Math.min(100, (d.composite / 100) * 100);
+      return (
+        <div style={{ background: "rgba(255,255,255,0.025)", borderRadius: 12, padding: "16px 18px", border: `1px solid ${d.color}18`, position: "relative", overflow: "hidden" }}>
+          <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 3, background: d.color, opacity: 0.6 }} />
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 4 }}>
+            <div>
+              <div style={{ fontSize: 15, fontWeight: 700, color: "#fff" }}>{d.name}</div>
+              <div style={{ fontSize: 11, color: "#777" }}>{d.provider} &middot; {d.released}</div>
+            </div>
+          </div>
+          <div style={{ marginTop: 10, marginBottom: 12 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#666", marginBottom: 4 }}>
+              <span>COMPOSITE SCORE</span>
+              <span style={{ color: "#f0c040", fontWeight: 700, fontSize: 13 }}>{d.composite.toFixed(1)}</span>
+            </div>
+            <div style={{ height: 6, background: "rgba(255,255,255,0.05)", borderRadius: 3, overflow: "hidden" }}>
+              <div style={{ height: "100%", width: `${barWidth}%`, background: `linear-gradient(90deg, ${d.color}88, ${d.color})`, borderRadius: 3, transition: "width 0.6s ease" }} />
+            </div>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 16px", fontSize: 12 }}>
+            <div>
+              <div style={{ color: "#555", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em" }}>Blended $/1M</div>
+              <div style={{ color: "#ccc", fontWeight: 600, fontFamily: "JetBrains Mono, monospace", fontSize: 13 }}>${d.cost.toFixed(3)}</div>
+            </div>
+            <div>
+              <div style={{ color: "#555", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em" }}>Perf/$</div>
+              <div style={{ color: "#4ade80", fontWeight: 700, fontSize: 20 }}>{d.ratio.toFixed(1)}</div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    /* ───────────── TIER PANEL ───────────── */
+    function TierPanel({ tier, models, inputRatio, cacheHit }) {
+      const data = useMemo(() => {
+        return models.map((m) => enrichModel(m, inputRatio, cacheHit)).sort((a, b) => b.ratio - a.ratio);
+      }, [models, inputRatio, cacheHit]);
+
+      const scatterData = useMemo(() => data.map((d) => ({
+        x: d.cost, y: d.composite, name: d.name, provider: d.provider, color: d.color, ratio: d.ratio, z: 350,
+      })), [data]);
+
+      return (
+        <div style={{ background: "linear-gradient(145deg, rgba(26,26,46,0.97), rgba(20,20,38,0.99))", borderRadius: 16, padding: "28px 24px", border: "1px solid rgba(255,255,255,0.05)", boxShadow: "0 4px 32px rgba(0,0,0,0.3)" }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 22 }}>
+            <span style={{ fontSize: 22 }}>{TIER_ICONS[tier]}</span>
+            <h3 style={{ margin: 0, fontSize: 24, fontWeight: 800, letterSpacing: "-0.02em", background: TIER_GRADIENTS[tier], WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>{TIER_LABELS[tier]}</h3>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 14, marginBottom: 24 }}>
+            {data.map((d) => <ModelCard key={d.name} d={d} />)}
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
+            <div>
+              <div style={{ fontSize: 11, color: "#777", marginBottom: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em" }}>Performance / Cost Ratio</div>
+              <ResponsiveContainer width="100%" height={190}>
+                <BarChart data={data} margin={{ top: 5, right: 20, bottom: 5, left: 0 }} barGap={8}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+                  <XAxis dataKey="name" tick={{ fill: "#aaa", fontSize: 11, fontWeight: 600 }} axisLine={{ stroke: "rgba(255,255,255,0.08)" }} />
+                  <YAxis tick={{ fill: "#888", fontSize: 11 }} axisLine={{ stroke: "rgba(255,255,255,0.08)" }} />
+                  <Tooltip content={<CustomBarTooltip />} />
+                  <Bar dataKey="ratio" name="Perf/$" radius={[5, 5, 0, 0]} maxBarSize={60}>
+                    {data.map((d, i) => <Cell key={i} fill={d.color} />)}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+            <div>
+              <div style={{ fontSize: 11, color: "#777", marginBottom: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em" }}>Cost vs Performance</div>
+              <ResponsiveContainer width="100%" height={190}>
+                <ScatterChart margin={{ top: 10, right: 10, bottom: 20, left: 4 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+                  <XAxis type="number" dataKey="x" name="Cost" tick={{ fill: "#888", fontSize: 10 }} axisLine={{ stroke: "rgba(255,255,255,0.08)" }} label={{ value: "$/1M tokens", position: "bottom", fill: "#555", fontSize: 10, offset: 0 }} />
+                  <YAxis type="number" dataKey="y" name="Score" tick={{ fill: "#888", fontSize: 10 }} axisLine={{ stroke: "rgba(255,255,255,0.08)" }} label={{ value: "Score", angle: -90, position: "insideLeft", fill: "#555", fontSize: 10 }} domain={["auto", "auto"]} />
+                  <ZAxis type="number" dataKey="z" range={[200, 200]} />
+                  <Tooltip content={<CustomScatterTooltip />} />
+                  <Scatter data={scatterData}>{scatterData.map((d, i) => <Cell key={i} fill={d.color} />)}</Scatter>
+                </ScatterChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    /* ───────────── SENSITIVITY HEATMAP ───────────── */
+    function SensitivityPanel() {
+      const models = ALL_FLAT;
+      const grid = useMemo(() => {
+        return models.map((m) => {
+          const comp = compositeScore(m);
+          const cells = {};
+          let best = 0;
+          IO_RATIOS.forEach((io) => {
+            CACHE_RATES.forEach((cr) => {
+              const cost = calcCost(m, io.value, cr.value);
+              const ratio = cost > 0 ? comp / cost : 0;
+              cells[`${io.label}_${cr.label}`] = ratio;
+              if (ratio > best) best = ratio;
+            });
+          });
+          return { ...m, composite: comp, cells, best };
+        });
+      }, [models]);
+
+      const globalMax = Math.max(...grid.map((g) => g.best));
+
+      function cellColor(val) {
+        const pct = val / globalMax;
+        if (pct > 0.7) return "#4ade80";
+        if (pct > 0.4) return "#f0c040";
+        if (pct > 0.2) return "#fb923c";
+        return "#f87171";
+      }
+
+      const winners = useMemo(() => {
+        const w = {};
+        IO_RATIOS.forEach((io) => {
+          CACHE_RATES.forEach((cr) => {
+            const key = `${io.label}_${cr.label}`;
+            let bestVal = 0, bestName = "";
+            grid.forEach((g) => { if (g.cells[key] > bestVal) { bestVal = g.cells[key]; bestName = g.name; } });
+            w[key] = bestName;
+          });
+        });
+        return w;
+      }, [grid]);
+
+      return (
+        <div style={{ background: "linear-gradient(145deg, rgba(26,26,46,0.97), rgba(20,20,38,0.99))", borderRadius: 16, border: "1px solid rgba(255,255,255,0.06)", boxShadow: "0 4px 32px rgba(0,0,0,0.3)", overflow: "hidden" }}>
+          <div style={{ padding: "20px 28px", borderBottom: "1px solid rgba(255,255,255,0.06)", background: "linear-gradient(90deg, rgba(248,113,113,0.04), rgba(74,222,128,0.04))" }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "#666", textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 4 }}>Sensitivity Analysis</div>
+            <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, letterSpacing: "-0.02em", background: "linear-gradient(135deg, #f87171, #4ade80)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
+              How Rankings Shift Across Usage Scenarios
+            </h2>
+            <p style={{ color: "#666", fontSize: 13, margin: "8px 0 0", lineHeight: 1.6 }}>
+              Each cell shows the Perf/$ ratio under a specific combination of input:output ratio and cache hit rate. Bold = best model for that scenario.
+            </p>
+          </div>
+          <div style={{ padding: "20px 24px", overflowX: "auto" }}>
+            {/* Winner grid */}
+            <div style={{ marginBottom: 24 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#bbb", marginBottom: 12 }}>{"\u{1F3C5}"} Best Value Model per Scenario</div>
+              <div style={{ display: "grid", gridTemplateColumns: `120px repeat(${CACHE_RATES.length}, 1fr)`, gap: 3 }}>
+                <div style={{ fontSize: 10, color: "#555", padding: "6px 8px" }} />
+                {CACHE_RATES.map((cr) => (
+                  <div key={cr.label} style={{ fontSize: 10, color: "#888", textAlign: "center", padding: "6px 4px", fontWeight: 700 }}>Cache {cr.label}</div>
+                ))}
+                {IO_RATIOS.map((io) => (
+                  <div key={io.label} style={{ display: "contents" }}>
+                    <div style={{ fontSize: 11, color: "#aaa", padding: "10px 8px", fontWeight: 600, display: "flex", alignItems: "center" }}>I:O {io.label}</div>
+                    {CACHE_RATES.map((cr) => {
+                      const key = `${io.label}_${cr.label}`;
+                      const winner = winners[key];
+                      const model = grid.find((g) => g.name === winner);
+                      return (
+                        <div key={key} style={{
+                          padding: "10px 10px", borderRadius: 8,
+                          background: `${model?.color}12`, border: `1px solid ${model?.color}25`,
+                          textAlign: "center", fontSize: 11, fontWeight: 700, color: model?.color || "#888"
+                        }}>{winner}</div>
+                      );
+                    })}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Full heatmap */}
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#bbb", marginBottom: 10 }}>{"\u{1F4CA}"} Full Perf/$ Heatmap</div>
+            <table style={{ width: "100%", borderCollapse: "separate", borderSpacing: 2, fontSize: 12 }}>
+              <thead>
+                <tr>
+                  <th style={{ padding: "8px 10px", textAlign: "left", color: "#666", fontWeight: 600, fontSize: 10, textTransform: "uppercase", width: 140 }}>Model</th>
+                  {IO_RATIOS.map((io) =>
+                    CACHE_RATES.map((cr) => (
+                      <th key={`${io.label}_${cr.label}`} style={{ padding: "6px 4px", textAlign: "center", color: "#666", fontSize: 9, fontWeight: 500, lineHeight: 1.4 }}>
+                        <div style={{ color: "#888", fontWeight: 700 }}>{io.label}</div>
+                        <div>{cr.label} cache</div>
+                      </th>
+                    ))
+                  )}
+                </tr>
+              </thead>
+              <tbody>
+                {[...grid].sort((a, b) => b.cells["3:1_50%"] - a.cells["3:1_50%"]).map((g) => (
+                  <tr key={g.name}>
+                    <td style={{ padding: "8px 10px", fontWeight: 700, color: g.color, whiteSpace: "nowrap", fontSize: 12 }}>
+                      <span style={{ fontSize: 9, color: "#555", marginRight: 4 }}>{TIER_ICONS[g.tier]}</span>
+                      {g.name}
+                    </td>
+                    {IO_RATIOS.map((io) =>
+                      CACHE_RATES.map((cr) => {
+                        const key = `${io.label}_${cr.label}`;
+                        const val = g.cells[key];
+                        const isWinner = winners[key] === g.name;
+                        return (
+                          <td key={key} style={{
+                            padding: "6px 6px", textAlign: "center", borderRadius: 6,
+                            fontFamily: "JetBrains Mono, monospace", fontSize: 11,
+                            background: `${cellColor(val)}${isWinner ? "22" : "0a"}`,
+                            color: cellColor(val), fontWeight: isWinner ? 800 : 400,
+                            border: isWinner ? `1.5px solid ${cellColor(val)}44` : "1.5px solid transparent",
+                          }}>
+                            {val.toFixed(1)}
+                          </td>
+                        );
+                      })
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            {/* Insights */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginTop: 20 }}>
+              {[
+                { icon: "\u{1F4A1}", title: "Input-heavy workloads favor cheap-input models", text: "At 10:1 ratio, Gemini models dominate \u2014 their low input prices shine when most tokens are prompts.", color: "#4285f4" },
+                { icon: "\u{1F504}", title: "Caching is transformative for expensive models", text: "Opus 4.6 Perf/$ nearly doubles from 0% \u2192 75% cache. Models with 90% cache discounts benefit most.", color: "#d97706" },
+                { icon: "\u2696\uFE0F", title: "Rankings can flip between scenarios", text: "The 'best value' model depends heavily on your usage pattern. No single model wins all 16 cells.", color: "#4ade80" },
+              ].map((c) => (
+                <div key={c.title} style={{ background: "rgba(255,255,255,0.02)", borderRadius: 10, padding: "14px 16px", border: "1px solid rgba(255,255,255,0.05)" }}>
+                  <div style={{ fontSize: 14, marginBottom: 6 }}>{c.icon}</div>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: c.color, marginBottom: 6, lineHeight: 1.4 }}>{c.title}</div>
+                  <div style={{ fontSize: 11, color: "#777", lineHeight: 1.6 }}>{c.text}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    /* ───────────── UI BUTTONS ───────────── */
+    function Pill({ active, onClick, label, sub, activeColor }) {
+      return (
+        <button onClick={onClick} style={{
+          cursor: "pointer", padding: "8px 14px", borderRadius: 10, fontSize: 13, fontWeight: 700, fontFamily: "inherit",
+          border: active ? `1.5px solid ${activeColor || "rgba(255,255,255,0.25)"}` : "1.5px solid rgba(255,255,255,0.06)",
+          background: active ? `${activeColor || "#fff"}10` : "transparent",
+          color: active ? "#fff" : "#666", transition: "all 0.2s", lineHeight: 1.3, textAlign: "center", minWidth: 72,
+        }}>
+          <div>{label}</div>
+          {sub && <div style={{ fontSize: 9, fontWeight: 500, color: active ? "#aaa" : "#555", marginTop: 2 }}>{sub}</div>}
+        </button>
+      );
+    }
+
+    function TabBtn({ active, onClick, children }) {
+      return (
+        <button onClick={onClick} style={{
+          cursor: "pointer", padding: "10px 22px", borderRadius: 10, fontSize: 13, fontWeight: 700, fontFamily: "inherit",
+          border: active ? "1.5px solid rgba(255,255,255,0.20)" : "1.5px solid rgba(255,255,255,0.06)",
+          background: active ? "rgba(255,255,255,0.07)" : "transparent",
+          color: active ? "#fff" : "#777", transition: "all 0.2s",
+        }}>{children}</button>
+      );
+    }
+
+    /* ═══════════════════════════════════════
+       MAIN DASHBOARD
+       ═══════════════════════════════════════ */
+    function Dashboard() {
+      const [ioIdx, setIoIdx] = useState(1);
+      const [cacheIdx, setCacheIdx] = useState(2);
+      const [tab, setTab] = useState("results");
+
+      const inputRatio = IO_RATIOS[ioIdx].value;
+      const cacheHit = CACHE_RATES[cacheIdx].value;
+
+      const allModels = useMemo(() => {
+        return ALL_FLAT.map((m) => enrichModel(m, inputRatio, cacheHit)).sort((a, b) => b.ratio - a.ratio);
+      }, [inputRatio, cacheHit]);
+
+      return (
+        <div style={{ minHeight: "100vh", background: "linear-gradient(180deg, #0a0a18 0%, #0f0f24 40%, #0a0a18 100%)", color: "#e0e0e0", fontFamily: "'DM Sans', 'Segoe UI', system-ui, sans-serif", padding: "36px 24px" }}>
+          <div style={{ maxWidth: 960, margin: "0 auto" }}>
+            {/* HEADER */}
+            <div style={{ marginBottom: 24, textAlign: "center" }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: "#666", textTransform: "uppercase", letterSpacing: "0.15em", marginBottom: 8 }}>Updated Feb 22, 2026</div>
+              <h1 style={{ fontSize: 32, fontWeight: 800, letterSpacing: "-0.03em", margin: "0 0 10px", background: "linear-gradient(135deg, #f0c040 0%, #ff6b6b 35%, #818cf8 65%, #38bdf8 100%)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
+                LLM Performance-to-Cost Ratio
+              </h1>
+              <p style={{ color: "#666", fontSize: 14, margin: 0, lineHeight: 1.6, maxWidth: 640, marginLeft: "auto", marginRight: "auto" }}>
+                Composite of GPQA Diamond, SWE-bench Verified, MMMLU &amp; Humanity's Last Exam &mdash; normalized and divided by blended token cost. Adjust assumptions below.
+              </p>
+            </div>
+
+            {/* PROVIDER LEGEND */}
+            <div style={{ display: "flex", justifyContent: "center", gap: 24, marginBottom: 18 }}>
+              {[{ name: "OpenAI", color: "#10a37f" }, { name: "Google", color: "#4285f4" }, { name: "Anthropic", color: "#d97706" }].map((p) => (
+                <div key={p.name} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+                  <div style={{ width: 12, height: 12, borderRadius: "50%", background: p.color, boxShadow: `0 0 8px ${p.color}44` }} />
+                  <span style={{ color: "#ccc", fontWeight: 600 }}>{p.name}</span>
+                </div>
+              ))}
+            </div>
+
+            {/* CONTROLS PANEL */}
+            <div style={{ background: "linear-gradient(145deg, rgba(26,26,46,0.97), rgba(20,20,38,0.99))", borderRadius: 16, padding: "22px 28px", marginBottom: 24, border: "1px solid rgba(255,255,255,0.06)", boxShadow: "0 4px 32px rgba(0,0,0,0.3)" }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24, marginBottom: 20 }}>
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "#888", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 10 }}>{"\u2699\uFE0F"} Input : Output Ratio</div>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    {IO_RATIOS.map((r, i) => <Pill key={r.label} active={ioIdx === i} onClick={() => setIoIdx(i)} label={r.label} sub={r.desc} activeColor="#f0c040" />)}
+                  </div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "#888", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 10 }}>{"\u{1F5C4}\uFE0F"} Prompt Cache Hit Rate</div>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    {CACHE_RATES.map((r, i) => <Pill key={r.label} active={cacheIdx === i} onClick={() => setCacheIdx(i)} label={r.label} sub={r.desc} activeColor="#38bdf8" />)}
+                  </div>
+                </div>
+              </div>
+
+              {/* Live formula */}
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px", background: "rgba(0,0,0,0.25)", borderRadius: 10, border: "1px solid rgba(255,255,255,0.05)", flexWrap: "wrap", gap: 10 }}>
+                <div style={{ fontFamily: "JetBrains Mono, monospace", fontSize: 12, color: "#aaa" }}>
+                  <span style={{ color: "#666" }}>cost =</span>{" "}
+                  <span style={{ color: "#38bdf8" }}>cached &times; {(cacheHit * inputRatio).toFixed(2)}</span>{" "}
+                  <span style={{ color: "#666" }}>+</span>{" "}
+                  <span style={{ color: "#f0c040" }}>input &times; {((1 - cacheHit) * inputRatio).toFixed(2)}</span>{" "}
+                  <span style={{ color: "#666" }}>+</span>{" "}
+                  <span style={{ color: "#4ade80" }}>output &times; {(1 - inputRatio).toFixed(2)}</span>
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <span style={{ background: "rgba(240,192,64,0.08)", border: "1px solid rgba(240,192,64,0.15)", borderRadius: 6, padding: "4px 10px", fontSize: 11, color: "#f0c040", fontWeight: 600 }}>I:O {IO_RATIOS[ioIdx].label}</span>
+                  <span style={{ background: "rgba(56,189,248,0.08)", border: "1px solid rgba(56,189,248,0.15)", borderRadius: 6, padding: "4px 10px", fontSize: 11, color: "#38bdf8", fontWeight: 600 }}>Cache {CACHE_RATES[cacheIdx].label}</span>
+                </div>
+              </div>
+
+              {/* Tabs */}
+              <div style={{ display: "flex", gap: 8, marginTop: 16, justifyContent: "center" }}>
+                <TabBtn active={tab === "results"} onClick={() => setTab("results")}>{"\u{1F4CA}"} Results</TabBtn>
+                <TabBtn active={tab === "sensitivity"} onClick={() => setTab("sensitivity")}>{"\u{1F52C}"} Sensitivity Analysis</TabBtn>
+              </div>
+            </div>
+
+            {/* RESULTS TAB */}
+            {tab === "results" && (
+              <div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+                  {Object.entries(MODELS).map(([tier, models]) => (
+                    <TierPanel key={tier} tier={tier} models={models} inputRatio={inputRatio} cacheHit={cacheHit} />
+                  ))}
+                </div>
+
+                {/* Ranking table */}
+                <div style={{ marginTop: 28, background: "rgba(255,255,255,0.02)", borderRadius: 14, border: "1px solid rgba(255,255,255,0.05)", overflow: "hidden" }}>
+                  <div style={{ padding: "16px 22px", borderBottom: "1px solid rgba(255,255,255,0.05)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <div style={{ fontSize: 15, fontWeight: 700, color: "#ccc" }}>Complete Ranking &mdash; All 9 Models</div>
+                    <div style={{ fontSize: 11, color: "#666" }}>I:O {IO_RATIOS[ioIdx].label} &middot; Cache {CACHE_RATES[cacheIdx].label}</div>
+                  </div>
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                      <thead>
+                        <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
+                          {["#", "Model", "Tier", "GPQA\u25C7", "SWE", "MMMLU", "HLE", "In$/M", "Out$/M", "Cache$/M", "Score", "Cost$/M", "Perf/$"].map((h) => (
+                            <th key={h} style={{ padding: "10px 10px", textAlign: h === "#" ? "center" : "left", color: "#777", fontWeight: 600, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", whiteSpace: "nowrap" }}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {allModels.map((m, i) => (
+                          <tr key={m.name} style={{ borderBottom: "1px solid rgba(255,255,255,0.03)", background: i === 0 ? "rgba(74,222,128,0.03)" : "transparent" }}>
+                            <td style={{ padding: "9px 10px", textAlign: "center", fontWeight: 700, color: i === 0 ? "#4ade80" : "#666", fontSize: 14 }}>{i + 1}</td>
+                            <td style={{ padding: "9px 10px", fontWeight: 700, color: m.color }}>{m.name}</td>
+                            <td style={{ padding: "9px 10px", color: "#666", fontSize: 12 }}>{TIER_ICONS[m.tier]} {TIER_LABELS[m.tier]}</td>
+                            <td style={{ padding: "9px 10px", fontFamily: "JetBrains Mono", fontSize: 12 }}>{m.gpqa}%</td>
+                            <td style={{ padding: "9px 10px", fontFamily: "JetBrains Mono", fontSize: 12 }}>{m.swebench}%</td>
+                            <td style={{ padding: "9px 10px", fontFamily: "JetBrains Mono", fontSize: 12 }}>{m.mmmlu}%</td>
+                            <td style={{ padding: "9px 10px", fontFamily: "JetBrains Mono", fontSize: 12 }}>{m.hle}%</td>
+                            <td style={{ padding: "9px 10px", fontFamily: "JetBrains Mono", fontSize: 12 }}>${m.inputPrice}</td>
+                            <td style={{ padding: "9px 10px", fontFamily: "JetBrains Mono", fontSize: 12 }}>${m.outputPrice}</td>
+                            <td style={{ padding: "9px 10px", fontFamily: "JetBrains Mono", fontSize: 12 }}>${m.cachedInputPrice}</td>
+                            <td style={{ padding: "9px 10px", fontWeight: 600, color: "#f0c040" }}>{m.composite.toFixed(1)}</td>
+                            <td style={{ padding: "9px 10px", fontFamily: "JetBrains Mono", fontSize: 12, color: "#ccc" }}>${m.cost.toFixed(3)}</td>
+                            <td style={{ padding: "9px 10px", fontWeight: 700, color: "#4ade80", fontSize: 14 }}>{m.ratio.toFixed(1)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* SENSITIVITY TAB */}
+            {tab === "sensitivity" && <SensitivityPanel />}
+
+            {/* METHODOLOGY (always visible) */}
+            <div id="methodology" style={{ marginTop: 28, background: "linear-gradient(145deg, rgba(26,26,46,0.97), rgba(20,20,38,0.99))", borderRadius: 16, border: "1px solid rgba(255,255,255,0.06)", boxShadow: "0 4px 32px rgba(0,0,0,0.3)", overflow: "hidden" }}>
+              <div style={{ padding: "20px 28px", borderBottom: "1px solid rgba(255,255,255,0.06)", background: "linear-gradient(90deg, rgba(240,192,64,0.04), rgba(56,189,248,0.04))" }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "#666", textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 4 }}>Methodology</div>
+                <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, letterSpacing: "-0.02em", background: "linear-gradient(135deg, #f0c040, #38bdf8)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>How the Performance-to-Cost Ratio Is Calculated</h2>
+              </div>
+              <div style={{ padding: "24px 28px" }}>
+                {/* 3-step flow */}
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 40px 1fr 40px 1fr", alignItems: "start", gap: 0, marginBottom: 32 }}>
+                  {/* Step 1 */}
+                  <div style={{ background: "rgba(240,192,64,0.04)", border: "1px solid rgba(240,192,64,0.12)", borderRadius: 14, padding: "18px 20px" }}>
+                    <div style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 28, height: 28, borderRadius: "50%", background: "rgba(240,192,64,0.12)", color: "#f0c040", fontSize: 14, fontWeight: 800, marginBottom: 10 }}>1</div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: "#f0c040", marginBottom: 10 }}>Measure Performance</div>
+                    <div style={{ fontSize: 12, color: "#999", lineHeight: 1.7, marginBottom: 14 }}>Score each model on 4 benchmarks:</div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                      {[
+                        { name: "GPQA Diamond", desc: "Expert science reasoning", range: "40\u201395%" },
+                        { name: "SWE-bench Verified", desc: "Real GitHub issues", range: "30\u201385%" },
+                        { name: "MMMLU", desc: "Multilingual knowledge", range: "60\u201395%" },
+                        { name: "Humanity's Last Exam", desc: "Frontier difficulty", range: "0\u201350%" },
+                      ].map((b) => (
+                        <div key={b.name} style={{ background: "rgba(255,255,255,0.02)", borderRadius: 8, padding: "8px 12px", border: "1px solid rgba(255,255,255,0.04)" }}>
+                          <div style={{ fontSize: 12, fontWeight: 700, color: "#ddd" }}>{b.name}</div>
+                          <div style={{ fontSize: 11, color: "#777" }}>{b.desc}</div>
+                          <div style={{ fontSize: 10, color: "#555", fontFamily: "JetBrains Mono, monospace", marginTop: 2 }}>Range: {b.range}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{ marginTop: 14, padding: "10px 14px", background: "rgba(240,192,64,0.06)", borderRadius: 8, border: "1px solid rgba(240,192,64,0.1)", fontSize: 12, color: "#bbb", lineHeight: 1.7 }}>
+                      Each benchmark <b style={{ color: "#f0c040" }}>normalized to 0&ndash;100</b>, then <b style={{ color: "#f0c040" }}>averaged equally</b>.
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "center", paddingTop: 60, color: "#444", fontSize: 22 }}>{"\u2192"}</div>
+
+                  {/* Step 2 */}
+                  <div style={{ background: "rgba(74,222,128,0.03)", border: "1px solid rgba(74,222,128,0.10)", borderRadius: 14, padding: "18px 20px" }}>
+                    <div style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 28, height: 28, borderRadius: "50%", background: "rgba(74,222,128,0.12)", color: "#4ade80", fontSize: 14, fontWeight: 800, marginBottom: 10 }}>2</div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: "#4ade80", marginBottom: 10 }}>Calculate Blended Cost</div>
+                    <div style={{ fontSize: 12, color: "#999", lineHeight: 1.7, marginBottom: 14 }}>Blend input/output/cached prices by your chosen ratios:</div>
+                    <div style={{ background: "rgba(0,0,0,0.3)", borderRadius: 10, padding: "14px 16px", border: "1px solid rgba(255,255,255,0.06)", marginBottom: 12 }}>
+                      <div style={{ fontSize: 10, color: "#666", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 8 }}>Formula</div>
+                      <div style={{ fontFamily: "JetBrains Mono, monospace", fontSize: 12, color: "#4ade80", lineHeight: 1.9 }}>
+                        <span style={{ color: "#888" }}>cost</span> = cached <span style={{ color: "#666" }}>&times;</span> (cache% <span style={{ color: "#666" }}>&times;</span> in_ratio)<br />
+                        &nbsp;&nbsp;&nbsp; + input <span style={{ color: "#666" }}>&times;</span> ((1&minus;cache%) <span style={{ color: "#666" }}>&times;</span> in_ratio)<br />
+                        &nbsp;&nbsp;&nbsp; + output <span style={{ color: "#666" }}>&times;</span> out_ratio
+                      </div>
+                    </div>
+                    <div style={{ fontSize: 12, color: "#777", lineHeight: 1.7 }}>
+                      <b style={{ color: "#bbb" }}>Input ratio</b> = fraction of tokens that are input (3:1 &rarr; 75%).<br />
+                      <b style={{ color: "#bbb" }}>Cache hit</b> = fraction of input served from cache at discounted rate.
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "center", paddingTop: 60, color: "#444", fontSize: 22 }}>{"\u2192"}</div>
+
+                  {/* Step 3 */}
+                  <div style={{ background: "rgba(56,189,248,0.03)", border: "1px solid rgba(56,189,248,0.10)", borderRadius: 14, padding: "18px 20px" }}>
+                    <div style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 28, height: 28, borderRadius: "50%", background: "rgba(56,189,248,0.12)", color: "#38bdf8", fontSize: 14, fontWeight: 800, marginBottom: 10 }}>3</div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: "#38bdf8", marginBottom: 10 }}>Divide: Score &divide; Cost</div>
+                    <div style={{ background: "rgba(0,0,0,0.35)", borderRadius: 12, padding: "20px 18px", border: "1px solid rgba(56,189,248,0.15)", textAlign: "center", marginBottom: 16 }}>
+                      <div style={{ fontFamily: "JetBrains Mono, monospace", fontSize: 20, color: "#fff", fontWeight: 700 }}>
+                        <span style={{ color: "#f0c040" }}>Score</span>
+                        <span style={{ color: "#555", margin: "0 8px" }}>/</span>
+                        <span style={{ color: "#4ade80" }}>Cost</span>
+                        <span style={{ color: "#555", margin: "0 8px" }}>=</span>
+                        <span style={{ color: "#38bdf8" }}>Perf/$</span>
+                      </div>
+                      <div style={{ fontSize: 11, color: "#666", marginTop: 8 }}>Higher = more performance per dollar</div>
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                      {[
+                        { icon: "\u{1F4C8}", text: "50+", detail: "Exceptional value", color: "#4ade80" },
+                        { icon: "\u{1F4CA}", text: "10\u201350", detail: "Solid value", color: "#f0c040" },
+                        { icon: "\u{1F4C9}", text: "<10", detail: "Premium pricing", color: "#f87171" },
+                      ].map((r) => (
+                        <div key={r.text} style={{ display: "flex", gap: 10, alignItems: "center", background: "rgba(255,255,255,0.02)", borderRadius: 8, padding: "8px 12px" }}>
+                          <span style={{ fontSize: 14 }}>{r.icon}</span>
+                          <div style={{ fontSize: 12 }}><span style={{ fontWeight: 700, color: r.color }}>{r.text}</span> &mdash; <span style={{ color: "#777" }}>{r.detail}</span></div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Live worked example */}
+                <div style={{ background: "rgba(255,255,255,0.02)", borderRadius: 14, padding: "20px 24px", border: "1px solid rgba(255,255,255,0.06)" }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#ccc", marginBottom: 14, display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 16 }}>{"\u{1F9EE}"}</span> Live Example: Gemini 3.1 Pro
+                    <span style={{ fontSize: 11, fontWeight: 500, color: "#666" }}>(I:O {IO_RATIOS[ioIdx].label}, Cache {CACHE_RATES[cacheIdx].label})</span>
+                  </div>
+                  {(() => {
+                    const m = MODELS.flagship[0];
+                    const comp = compositeScore(m);
+                    const cost = calcCost(m, inputRatio, cacheHit);
+                    const ratio = comp / cost;
+                    const outRatio = 1 - inputRatio;
+                    return (
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 20 }}>
+                        <div>
+                          <div style={{ fontSize: 10, color: "#f0c040", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 8, fontWeight: 700 }}>Step 1 &mdash; Normalize</div>
+                          <div style={{ fontFamily: "JetBrains Mono, monospace", fontSize: 12, color: "#aaa", lineHeight: 2.1 }}>
+                            <div>GPQA  {m.gpqa}% &rarr; <span style={{ color: "#f0c040" }}>{normalize(m.gpqa, 40, 95).toFixed(1)}</span></div>
+                            <div>SWE   {m.swebench}% &rarr; <span style={{ color: "#f0c040" }}>{normalize(m.swebench, 30, 85).toFixed(1)}</span></div>
+                            <div>MMMLU {m.mmmlu}% &rarr; <span style={{ color: "#f0c040" }}>{normalize(m.mmmlu, 60, 95).toFixed(1)}</span></div>
+                            <div>HLE   {m.hle}% &rarr; <span style={{ color: "#f0c040" }}>{normalize(m.hle, 0, 50).toFixed(1)}</span></div>
+                            <div style={{ borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 4, marginTop: 4, color: "#f0c040", fontWeight: 700 }}>Avg = <span style={{ fontSize: 15 }}>{comp.toFixed(1)}</span></div>
+                          </div>
+                        </div>
+                        <div>
+                          <div style={{ fontSize: 10, color: "#4ade80", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 8, fontWeight: 700 }}>Step 2 &mdash; Blended Cost</div>
+                          <div style={{ fontFamily: "JetBrains Mono, monospace", fontSize: 12, color: "#aaa", lineHeight: 2.1 }}>
+                            <div style={{ color: "#666" }}>In: ${m.inputPrice} &middot; Out: ${m.outputPrice} &middot; Cache: ${m.cachedInputPrice}</div>
+                            <div style={{ marginTop: 4 }}>${m.cachedInputPrice} &times; {(cacheHit * inputRatio).toFixed(3)}</div>
+                            <div>+ ${m.inputPrice} &times; {((1 - cacheHit) * inputRatio).toFixed(3)}</div>
+                            <div>+ ${m.outputPrice} &times; {outRatio.toFixed(3)}</div>
+                            <div style={{ borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 4, marginTop: 4, color: "#4ade80", fontWeight: 700 }}>= <span style={{ fontSize: 15 }}>${cost.toFixed(3)}</span></div>
+                          </div>
+                        </div>
+                        <div>
+                          <div style={{ fontSize: 10, color: "#38bdf8", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 8, fontWeight: 700 }}>Step 3 &mdash; Divide</div>
+                          <div style={{ fontFamily: "JetBrains Mono, monospace", fontSize: 12, color: "#aaa", lineHeight: 2.1 }}>
+                            <div><span style={{ color: "#f0c040" }}>{comp.toFixed(1)}</span> / <span style={{ color: "#4ade80" }}>${cost.toFixed(3)}</span></div>
+                            <div style={{ marginTop: 4, color: "#fff", fontWeight: 700, fontSize: 18 }}>= {ratio.toFixed(1)}</div>
+                            <div style={{ marginTop: 10, color: "#666", fontSize: 11, lineHeight: 1.5 }}>&rarr; {ratio.toFixed(1)} units of performance per $1.</div>
+                            <div style={{ marginTop: 6, color: "#555", fontSize: 10 }}>Change the controls above &mdash; this updates live!</div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                <div style={{ marginTop: 18, fontSize: 12, color: "#555", lineHeight: 1.7, padding: "0 4px" }}>
+                  <b style={{ color: "#777" }}>Notes:</b> GPT-5.3 Codex excluded &mdash; no public API pricing yet. Gemini 3.1 Pro in preview &mdash; pricing may change at GA.
+                  Some mid/budget scores estimated. Cache discounts: Anthropic/OpenAI 90% off input; Google 75&ndash;90% off.
+                </div>
+              </div>
+            </div>
+
+            {/* FOOTER */}
+            <div style={{ textAlign: "center", marginTop: 24, fontSize: 11, color: "#444", lineHeight: 1.7 }}>
+              Data from Anthropic, OpenAI, Google announcements, Vellum Leaderboard, Artificial Analysis. Feb 22, 2026.<br />
+              GPT-5.3 Codex omitted (no API pricing). Gemini 3.1 Pro in preview. Some budget scores estimated. Verify before production use.
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    /* ── Mount ── */
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<Dashboard />);
+  </script>
+</body>
+</html>
